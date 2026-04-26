@@ -1,0 +1,919 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Music CN Tagger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+          mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+        }
+      }
+    }
+  }
+</script>
+<style>
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  /* Soft animated gradient background */
+  .bg-canvas {
+    background:
+      radial-gradient(1200px 600px at -10% -10%, rgba(167, 139, 250, 0.15), transparent 50%),
+      radial-gradient(1000px 500px at 110% 10%, rgba(244, 114, 182, 0.10), transparent 50%),
+      linear-gradient(180deg, #fafafa 0%, #f4f4f5 100%);
+  }
+  /* Hide default checkbox styling for a cleaner look */
+  input[type="checkbox"].chk {
+    appearance: none; -webkit-appearance: none;
+    width: 18px; height: 18px;
+    border: 1.5px solid #cbd5e1; border-radius: 5px;
+    background: white; cursor: pointer;
+    transition: all 0.15s ease;
+    position: relative; flex-shrink: 0;
+  }
+  input[type="checkbox"].chk:hover { border-color: #8b5cf6; }
+  input[type="checkbox"].chk:checked {
+    background: linear-gradient(135deg, #8b5cf6, #d946ef);
+    border-color: transparent;
+  }
+  input[type="checkbox"].chk:checked::after {
+    content: ''; position: absolute;
+    left: 5px; top: 1.5px; width: 5px; height: 9px;
+    border: solid white; border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  /* Inline-editable inputs in table rows */
+  .cell-edit {
+    width: 100%;
+    border: 1px solid transparent;
+    background: transparent;
+    padding: 4px 6px;
+    border-radius: 6px;
+    font-size: inherit;
+    color: inherit;
+    transition: all 0.12s ease;
+  }
+  .cell-edit:hover { background: #f8fafc; }
+  .cell-edit:focus {
+    outline: none; background: white;
+    border-color: #8b5cf6;
+    box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.12);
+  }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  [x-cloak] { display: none !important; }
+  /* Pulsing dot for live status */
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(1.2); }
+  }
+  .pulse-dot { animation: pulse-dot 1.4s ease-in-out infinite; }
+</style>
+</head>
+<body class="bg-canvas min-h-screen text-slate-800" x-data="app()" x-cloak>
+
+<!-- Header -->
+<header class="border-b border-slate-200/60 bg-white/70 backdrop-blur-md sticky top-0 z-20">
+  <div class="max-w-7xl mx-auto px-6 py-3.5 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center text-white text-lg shadow-sm shadow-violet-200">
+        ♪
+      </div>
+      <div>
+        <h1 class="text-base font-semibold text-slate-900 tracking-tight">Music CN Tagger</h1>
+        <p class="text-xs text-slate-500">音乐标签转中文 · iTunes & 网易云</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2 text-xs text-slate-500">
+      <span class="w-2 h-2 rounded-full bg-emerald-500" :class="scanning && 'pulse-dot'"></span>
+      <span x-text="scanning ? '扫描中' : (rows.length ? `${rows.length} 条结果` : '就绪')"></span>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-6 py-8 space-y-6">
+
+  <!-- ============= Configure ============= -->
+  <section class="bg-white rounded-2xl ring-1 ring-slate-200/60 shadow-sm shadow-slate-200/40 p-6 space-y-5">
+    <h2 class="text-sm font-semibold text-slate-900 tracking-wide uppercase mb-1">1. 配置</h2>
+
+    <!-- Source dir -->
+    <div>
+      <label class="block text-sm font-medium text-slate-700 mb-1.5">音乐目录</label>
+      <div class="flex gap-2">
+        <input type="text" x-model="srcDir" placeholder="选择或粘贴目录路径..."
+               class="flex-1 px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50/60 focus:bg-white focus:border-violet-400 focus:ring-2 focus:ring-violet-500/15 outline-none text-sm font-mono transition">
+        <button @click="openBrowser(srcDir)"
+                class="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-sm font-medium text-slate-700 inline-flex items-center gap-1.5 transition">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+          浏览
+        </button>
+      </div>
+    </div>
+
+    <!-- Options -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-5 pt-2">
+      <div>
+        <label class="block text-sm font-medium text-slate-700 mb-2">数据源</label>
+        <div class="space-y-1.5">
+          <template x-for="(s, idx) in sources" :key="s">
+            <div class="flex items-center justify-between bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200 text-sm">
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-slate-400 font-mono tabular-nums" x-text="`${idx+1}.`"></span>
+                <span x-text="sourceLabel(s)"></span>
+              </div>
+              <div class="flex gap-0.5">
+                <button @click="moveSource(idx, -1)" :disabled="idx === 0"
+                        class="text-slate-400 hover:text-violet-600 disabled:opacity-20 disabled:cursor-not-allowed text-xs px-1">▲</button>
+                <button @click="moveSource(idx, 1)" :disabled="idx === sources.length - 1"
+                        class="text-slate-400 hover:text-violet-600 disabled:opacity-20 disabled:cursor-not-allowed text-xs px-1">▼</button>
+              </div>
+            </div>
+          </template>
+        </div>
+        <p class="text-xs text-slate-400 mt-1.5">按顺序尝试，先成功者胜</p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-slate-700 mb-2">iTunes 储存区</label>
+        <select x-model="country"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/15 outline-none text-sm bg-white">
+          <option value="tw">台灣 (繁體, 华语全 catalog)</option>
+          <option value="cn">中国 (简体, 部分受限)</option>
+          <option value="hk">香港 (繁體)</option>
+          <option value="jp">日本 (日語)</option>
+          <option value="us">United States</option>
+        </select>
+        <label class="flex items-center gap-2 mt-2 cursor-pointer text-sm">
+          <input type="checkbox" x-model="simplified" class="chk">
+          <span>转为简体</span>
+        </label>
+      </div>
+      <div>
+        <label class="flex items-center justify-between text-sm font-medium text-slate-700 mb-2">
+          <span>置信度阈值</span>
+          <span class="text-violet-600 font-mono font-semibold tabular-nums" x-text="Number(threshold).toFixed(2)"></span>
+        </label>
+        <input type="range" min="0" max="1" step="0.05" x-model.number="threshold"
+               class="w-full accent-violet-500 cursor-pointer">
+        <p class="text-xs text-slate-400 mt-1">≥ 此分数自动勾选 apply</p>
+        <label class="block text-sm font-medium text-slate-700 mt-3 mb-1">投票曲数</label>
+        <input type="number" min="1" max="20" x-model.number="voteN"
+               class="w-full px-3 py-2 rounded-lg border border-slate-200 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/15 outline-none text-sm tabular-nums">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-slate-700 mb-2">扫描 / 应用</label>
+        <label class="flex items-center gap-2.5 cursor-pointer p-2 rounded-lg hover:bg-slate-50 transition">
+          <input type="checkbox" x-model="perTrack" class="chk">
+          <span class="text-sm text-slate-700">逐曲搜索（自动模式）</span>
+        </label>
+        <label class="flex items-center gap-2.5 cursor-pointer p-2 rounded-lg hover:bg-slate-50 transition">
+          <input type="checkbox" x-model="renameFiles" class="chk">
+          <span class="text-sm text-slate-700">应用时同步重命名文件</span>
+        </label>
+        <p class="text-xs text-slate-400 mt-1 pl-2">格式：<span class="font-mono">NN - 新标题.ext</span></p>
+      </div>
+    </div>
+
+    <!-- Known album/artist (manual mode) -->
+    <details class="border-t border-slate-100 pt-4 group" :open="manual.album || manual.artist">
+      <summary class="cursor-pointer list-none inline-flex items-center gap-1.5 text-sm font-medium text-slate-700 hover:text-violet-600 transition select-none">
+        <svg class="w-3.5 h-3.5 transform transition group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+        已知专辑/艺人名？<span class="text-slate-400 font-normal">— 跳过自动检测，直接搜 iTunes 拿候选</span>
+      </summary>
+      <div class="mt-3 space-y-3">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1">专辑名</label>
+            <input type="text" x-model="manual.album" placeholder="例: 叶惠美 / Yeh Hui-mei"
+                   @keyup.enter="previewAlbum()"
+                   class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:border-violet-400 focus:ring-2 focus:ring-violet-500/15 outline-none">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1">艺人名</label>
+            <input type="text" x-model="manual.artist" placeholder="例: 周杰伦 / Jay Chou"
+                   @keyup.enter="previewAlbum()"
+                   class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:border-violet-400 focus:ring-2 focus:ring-violet-500/15 outline-none">
+          </div>
+        </div>
+        <div class="flex justify-between items-center">
+          <p class="text-xs text-slate-400">
+            将使用 <span class="font-mono text-slate-500" x-text="srcDir ? basename(srcDir) : '<目录未选>'"></span> 作为待匹配目录
+          </p>
+          <button @click="previewAlbum()"
+                  :disabled="previewLoading || (!manual.album.trim() && !manual.artist.trim()) || !srcDir"
+                  class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-sm font-medium inline-flex items-center gap-1.5 transition">
+            <svg x-show="!previewLoading" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/></svg>
+            <svg x-show="previewLoading" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 60" opacity="0.6"/></svg>
+            <span x-text="previewLoading ? '搜索中…' : '搜索预览'"></span>
+          </button>
+        </div>
+      </div>
+    </details>
+
+    <!-- Scan button -->
+    <div class="flex justify-end pt-3 border-t border-slate-100">
+      <button @click="startScan()" :disabled="scanning || !srcDir"
+              class="px-7 py-2.5 rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-600 hover:from-violet-700 hover:to-fuchsia-700 disabled:from-slate-300 disabled:to-slate-300 disabled:cursor-not-allowed text-white text-sm font-semibold shadow-sm shadow-violet-300/40 disabled:shadow-none inline-flex items-center gap-2 transition">
+        <template x-if="!scanning">
+          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        </template>
+        <template x-if="scanning">
+          <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 60" opacity="0.6"/></svg>
+        </template>
+        <span x-text="scanning ? '扫描中…' : '开始自动扫描'"></span>
+      </button>
+    </div>
+  </section>
+
+  <!-- ============= Progress ============= -->
+  <section x-show="scanning || progress.total"
+           class="bg-white rounded-2xl ring-1 ring-slate-200/60 shadow-sm shadow-slate-200/40 p-6 space-y-3"
+           x-transition:enter="transition ease-out duration-300"
+           x-transition:enter-start="opacity-0 transform translate-y-2"
+           x-transition:enter-end="opacity-100 transform translate-y-0">
+    <div class="flex items-baseline justify-between">
+      <h2 class="text-sm font-semibold text-slate-900 tracking-wide uppercase">2. 进度</h2>
+      <span class="text-xs text-slate-500 font-mono tabular-nums"
+            x-text="`${progress.done}/${progress.total} 文件夹  ·  ${rows.length} 条`"></span>
+    </div>
+
+    <div class="h-2 bg-slate-100 rounded-full overflow-hidden">
+      <div class="h-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-pink-500 transition-all duration-500 ease-out"
+           :style="`width: ${progress.total ? (progress.done / progress.total * 100) : (scanning ? 5 : 0)}%`"></div>
+    </div>
+
+    <div class="text-sm text-slate-600 truncate font-mono"
+         x-text="currentFolder ? `▸ ${currentFolder.folder}` : ''"></div>
+
+    <div x-ref="logFeed"
+         class="max-h-40 overflow-y-auto bg-slate-50/60 rounded-xl p-3 font-mono text-xs space-y-0.5 scrollbar-thin">
+      <template x-for="(line, i) in logLines" :key="i">
+        <div class="text-slate-600 whitespace-pre" x-text="line"></div>
+      </template>
+      <template x-if="!logLines.length">
+        <div class="text-slate-400 italic">等待开始…</div>
+      </template>
+    </div>
+  </section>
+
+  <!-- ============= Preview candidates ============= -->
+  <section x-show="previewCandidates.length || previewLoading"
+           class="bg-white rounded-2xl ring-1 ring-slate-200/60 shadow-sm shadow-slate-200/40 p-6 space-y-4"
+           x-transition:enter="transition ease-out duration-300"
+           x-transition:enter-start="opacity-0 transform translate-y-2"
+           x-transition:enter-end="opacity-100 transform translate-y-0">
+    <div class="flex items-baseline justify-between">
+      <h2 class="text-sm font-semibold text-slate-900 tracking-wide uppercase">候选专辑</h2>
+      <span class="text-xs text-slate-400">
+        点 <span class="font-medium text-emerald-600">✓ 就是这个</span> 后会按本目录文件匹配曲目
+      </span>
+    </div>
+
+    <div x-show="previewLoading" class="text-sm text-slate-400 py-6 text-center">搜索中…</div>
+
+    <div x-show="!previewLoading && !previewCandidates.length" class="text-sm text-slate-400 py-6 text-center">
+      没有 CJK 候选 — 试试换个储存区，或把艺人名填得更准确
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <template x-for="c in previewCandidates" :key="c.album_id">
+        <div class="border border-slate-200 rounded-xl overflow-hidden hover:border-violet-300 hover:shadow-sm transition">
+          <div class="flex gap-3 p-3">
+            <img :src="c.artwork || ''" :alt="c.name"
+                 class="w-20 h-20 rounded-lg bg-slate-100 object-cover flex-shrink-0"
+                 @error="$event.target.style.visibility='hidden'">
+            <div class="flex-1 min-w-0">
+              <div class="font-medium text-slate-900 truncate" :title="c.name" x-text="c.name"></div>
+              <div class="text-sm text-slate-600 truncate" :title="c.artist" x-text="c.artist"></div>
+              <div class="text-xs text-slate-400 mt-1">
+                <span x-text="`${c.track_count} tracks`"></span>
+                <span x-show="c.release_date" class="mx-1">·</span>
+                <span x-text="c.release_date"></span>
+                <span class="mx-1">·</span>
+                <span x-text="c.phase"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="px-3 pb-2 max-h-32 overflow-y-auto scrollbar-thin border-t border-slate-100 bg-slate-50/40">
+            <template x-for="t in c.tracks" :key="t.no">
+              <div class="text-xs text-slate-600 py-0.5 flex gap-2">
+                <span class="text-slate-400 font-mono tabular-nums w-6 text-right" x-text="t.no"></span>
+                <span class="truncate" :title="t.name" x-text="t.name"></span>
+              </div>
+            </template>
+          </div>
+
+          <div class="px-3 py-2 flex justify-between items-center bg-white border-t border-slate-100">
+            <span class="text-xs text-slate-400" x-show="previewLocalCount">
+              本地 <span x-text="previewLocalCount"></span> 个文件
+              <template x-if="previewLocalCount === c.track_count">
+                <span class="text-emerald-600 ml-1">·  曲数完全一致 ✓</span>
+              </template>
+              <template x-if="previewLocalCount && Math.abs(previewLocalCount - c.track_count) > 0">
+                <span class="text-amber-600 ml-1" x-text="`(差 ${Math.abs(previewLocalCount - c.track_count)})`"></span>
+              </template>
+            </span>
+            <button @click="confirmCandidate(c)"
+                    :disabled="confirmLoading"
+                    class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-xs font-medium transition inline-flex items-center gap-1">
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+              就是这个
+            </button>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <div class="flex justify-end pt-2 border-t border-slate-100">
+      <button @click="previewCandidates = []" class="text-xs text-slate-500 hover:text-rose-600 transition">
+        清空候选
+      </button>
+    </div>
+  </section>
+
+  <!-- ============= Results ============= -->
+  <section x-show="rows.length"
+           class="bg-white rounded-2xl ring-1 ring-slate-200/60 shadow-sm shadow-slate-200/40 overflow-hidden"
+           x-transition:enter="transition ease-out duration-300"
+           x-transition:enter-start="opacity-0"
+           x-transition:enter-end="opacity-100">
+
+    <header class="px-6 py-5 border-b border-slate-100 flex items-center justify-between gap-4 flex-wrap">
+      <div class="flex items-baseline gap-4">
+        <h2 class="text-sm font-semibold text-slate-900 tracking-wide uppercase">3. 结果</h2>
+        <div class="text-sm text-slate-500">
+          共 <span class="font-semibold text-slate-700" x-text="rows.length"></span> 条 ·
+          已勾选 <span class="font-semibold text-violet-700" x-text="selectedCount"></span> 条待应用
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2 flex-wrap">
+        <select x-model="filter"
+                class="px-3 py-1.5 rounded-lg border border-slate-200 text-sm bg-white focus:border-violet-400 focus:ring-2 focus:ring-violet-500/15 outline-none">
+          <option value="">全部</option>
+          <option value="apply">仅勾选</option>
+          <option value="skip">仅未勾选</option>
+          <option value="review">需复查（fuzzy/position/per-track）</option>
+          <option value="no-match">无匹配</option>
+          <option value="already-cn">已是中文</option>
+        </select>
+        <input type="text" x-model="search" placeholder="搜索文件名 / 标题…"
+               class="px-3 py-1.5 rounded-lg border border-slate-200 text-sm w-56 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/15 outline-none">
+        <button @click="setAllVisible(1)" class="px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition">全选可见</button>
+        <button @click="setAllVisible(0)" class="px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition">取消可见</button>
+      </div>
+    </header>
+
+    <!-- Table -->
+    <div class="overflow-x-auto scrollbar-thin">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50/60 text-slate-500 text-xs uppercase tracking-wider">
+          <tr>
+            <th class="px-4 py-3 w-10">
+              <input type="checkbox" class="chk" :checked="allVisibleSelected"
+                     @change="setAllVisible(allVisibleSelected ? 0 : 1)">
+            </th>
+            <th class="px-4 py-3 text-left">文件</th>
+            <th class="px-3 py-3 text-left w-20">源</th>
+            <th class="px-3 py-3 text-left w-32">方法</th>
+            <th class="px-3 py-3 text-left w-16">分</th>
+            <th class="px-3 py-3 text-left">Title</th>
+            <th class="px-3 py-3 text-left">Artist</th>
+            <th class="px-3 py-3 text-left">Album</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          <template x-for="(row, idx) in filteredRows" :key="row.file">
+            <tr class="group hover:bg-violet-50/30 transition-colors">
+              <td class="px-4 py-2.5 align-top">
+                <input type="checkbox" class="chk"
+                       :checked="row.apply == 1"
+                       @change="row.apply = $event.target.checked ? 1 : 0">
+              </td>
+              <td class="px-4 py-2.5 max-w-[18rem] align-top">
+                <div class="font-medium text-slate-800 truncate" :title="row.file" x-text="basename(row.file)"></div>
+                <div class="text-xs text-slate-400 truncate font-mono" :title="row.file" x-text="dirname(row.file)"></div>
+              </td>
+              <td class="px-3 py-2.5 align-top">
+                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ring-1"
+                      :class="sourceStyle(row.source)"
+                      x-text="row.source || '—'"></span>
+              </td>
+              <td class="px-3 py-2.5 align-top">
+                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ring-1"
+                      :class="methodStyle(row.match_method)"
+                      x-text="row.match_method || '—'"></span>
+              </td>
+              <td class="px-3 py-2.5 text-slate-600 font-mono tabular-nums align-top" x-text="row.confidence || ''"></td>
+              <td class="px-3 py-2.5 align-top">
+                <div class="text-xs text-slate-400 line-through truncate max-w-xs" :title="row.old_title" x-text="row.old_title || '—'"></div>
+                <input class="cell-edit" x-model="row.new_title" placeholder="—">
+              </td>
+              <td class="px-3 py-2.5 align-top">
+                <div class="text-xs text-slate-400 line-through truncate max-w-xs" :title="row.old_artist" x-text="row.old_artist || '—'"></div>
+                <input class="cell-edit" x-model="row.new_artist" placeholder="—">
+              </td>
+              <td class="px-3 py-2.5 align-top">
+                <div class="text-xs text-slate-400 line-through truncate max-w-xs" :title="row.old_album" x-text="row.old_album || '—'"></div>
+                <input class="cell-edit" x-model="row.new_album" placeholder="—">
+              </td>
+            </tr>
+          </template>
+          <template x-if="!filteredRows.length">
+            <tr><td colspan="8" class="px-4 py-12 text-center text-sm text-slate-400">没有符合条件的结果</td></tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+
+    <footer class="px-6 py-4 border-t border-slate-100 bg-slate-50/40 flex justify-between items-center gap-3 flex-wrap">
+      <div class="text-xs text-slate-500">
+        <span class="inline-flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-emerald-500"></span>tracknumber/alias-exact</span>
+        <span class="mx-2">·</span>
+        <span class="inline-flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-amber-500"></span>fuzzy</span>
+        <span class="mx-2">·</span>
+        <span class="inline-flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-blue-500"></span>position</span>
+        <span class="mx-2">·</span>
+        <span class="inline-flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-rose-500"></span>no-match</span>
+      </div>
+      <button @click="applySelected()" :disabled="!selectedCount"
+              class="px-5 py-2 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 disabled:from-slate-300 disabled:to-slate-300 disabled:cursor-not-allowed text-white text-sm font-semibold shadow-sm shadow-emerald-300/40 disabled:shadow-none inline-flex items-center gap-1.5 transition">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+        应用到 <span x-text="selectedCount"></span> 个文件
+      </button>
+    </footer>
+  </section>
+
+  <!-- Empty hint -->
+  <section x-show="!scanning && !rows.length && !progress.total"
+           class="text-center py-12 text-sm text-slate-400">
+    选择目录后点击「开始扫描」，结果会出现在这里。
+  </section>
+</main>
+
+<!-- Directory browser modal -->
+<div x-show="browser.open" x-transition.opacity
+     class="fixed inset-0 z-30 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-6"
+     @click.self="closeBrowser()" @keydown.escape.window="closeBrowser()">
+  <div class="bg-white rounded-2xl shadow-xl shadow-slate-900/10 w-full max-w-2xl max-h-[80vh] flex flex-col"
+       x-transition:enter="transition ease-out duration-200"
+       x-transition:enter-start="opacity-0 scale-95"
+       x-transition:enter-end="opacity-100 scale-100"
+       @click.stop>
+    <header class="px-5 py-4 border-b border-slate-100">
+      <div class="flex items-center justify-between gap-3">
+        <h3 class="text-sm font-semibold text-slate-900 tracking-wide uppercase">选择音乐目录</h3>
+        <button @click="closeBrowser()" class="text-slate-400 hover:text-slate-700 text-xl leading-none">&times;</button>
+      </div>
+      <div class="mt-2 flex items-center gap-2">
+        <button @click="browser.parent && browseTo(browser.parent)" :disabled="!browser.parent"
+                class="text-slate-400 hover:text-violet-600 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                title="上一级">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+        </button>
+        <span class="text-xs font-mono text-slate-500 break-all flex-1" x-text="browser.path || '...'"></span>
+      </div>
+    </header>
+
+    <div class="flex-1 overflow-y-auto p-2 scrollbar-thin min-h-[200px]">
+      <div x-show="browser.loading" class="text-sm text-slate-400 py-8 text-center">加载中…</div>
+      <template x-if="!browser.loading && browser.entries.length === 0">
+        <div class="text-sm text-slate-400 py-8 text-center">
+          (此目录无子文件夹<span x-show="browser.current_count">；当前目录有 <span x-text="browser.current_count"></span> 个音频文件</span>)
+        </div>
+      </template>
+      <template x-for="e in browser.entries" :key="e.path">
+        <button @click="browseTo(e.path)"
+                class="w-full text-left px-3 py-2 rounded-lg hover:bg-violet-50 flex items-center justify-between gap-3 text-sm group transition">
+          <div class="flex items-center gap-2 min-w-0">
+            <svg class="w-4 h-4 text-violet-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+            <span class="truncate" x-text="e.name"></span>
+          </div>
+          <span x-show="e.music_count" class="text-xs text-slate-400 font-mono tabular-nums flex-shrink-0"
+                x-text="`${e.music_count} 首`"></span>
+        </button>
+      </template>
+    </div>
+
+    <footer class="px-5 py-3 border-t border-slate-100 flex justify-between items-center gap-3">
+      <span class="text-xs text-slate-500">
+        <template x-if="browser.current_count">
+          <span>本目录有 <span class="font-semibold text-slate-700" x-text="browser.current_count"></span> 个音频文件</span>
+        </template>
+        <template x-if="!browser.current_count">
+          <span class="text-slate-400">本目录无音频文件，可深入子文件夹</span>
+        </template>
+      </span>
+      <div class="flex gap-2">
+        <button @click="closeBrowser()"
+                class="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">取消</button>
+        <button @click="confirmBrowse()" :disabled="!browser.path"
+                class="px-4 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:bg-slate-300 text-white text-sm font-medium rounded-lg transition">
+          选定此目录
+        </button>
+      </div>
+    </footer>
+  </div>
+</div>
+
+<!-- Toast -->
+<div x-show="toastMessage" x-transition.opacity
+     class="fixed bottom-6 right-6 z-50 px-4 py-3 rounded-xl bg-slate-900 text-white text-sm shadow-lg shadow-slate-900/20 max-w-md"
+     :class="toastKind === 'error' ? 'bg-rose-600' : (toastKind === 'success' ? 'bg-emerald-600' : 'bg-slate-900')">
+  <span x-text="toastMessage"></span>
+</div>
+
+<script>
+function app() {
+  return {
+    // Config
+    srcDir: '',
+    threshold: 0.6,
+    voteN: 4,
+    perTrack: false,
+    country: 'tw',
+    simplified: true,
+    sources: ['netease', 'itunes'],
+    renameFiles: true,
+
+    // Scan state
+    scanning: false,
+    progress: { done: 0, total: 0 },
+    currentFolder: null,
+    logLines: [],
+
+    // Results
+    rows: [],
+    filter: '',
+    search: '',
+
+    // Directory browser
+    browser: { open: false, path: '', parent: null, entries: [], current_count: 0, loading: false },
+
+    // Manual / preview
+    manual: { album: '', artist: '' },
+    previewCandidates: [],
+    previewLoading: false,
+    previewLocalCount: 0,
+    confirmLoading: false,
+
+    // Toast
+    toastMessage: '',
+    toastKind: '',
+
+    init() {
+      try {
+        const saved = JSON.parse(localStorage.getItem('mct') || '{}');
+        if (saved.srcDir) this.srcDir = saved.srcDir;
+        if (saved.threshold !== undefined) this.threshold = saved.threshold;
+        if (saved.voteN !== undefined) this.voteN = saved.voteN;
+        if (saved.perTrack !== undefined) this.perTrack = saved.perTrack;
+        if (saved.country) this.country = saved.country;
+        if (saved.simplified !== undefined) this.simplified = saved.simplified;
+        if (Array.isArray(saved.sources) && saved.sources.length) this.sources = saved.sources;
+        if (saved.renameFiles !== undefined) this.renameFiles = saved.renameFiles;
+      } catch {}
+      const keys = ['srcDir','threshold','voteN','perTrack','country','simplified','sources','renameFiles'];
+      keys.forEach(k => this.$watch(k, () => this.persist()));
+    },
+
+    persist() {
+      localStorage.setItem('mct', JSON.stringify({
+        srcDir: this.srcDir,
+        threshold: this.threshold, voteN: this.voteN, perTrack: this.perTrack,
+        country: this.country, simplified: this.simplified,
+        sources: [...this.sources], renameFiles: this.renameFiles,
+      }));
+    },
+
+    sourceLabel(s) {
+      return ({
+        itunes: 'Apple iTunes',
+        netease: '网易云音乐',
+      })[s] || s;
+    },
+
+    moveSource(idx, delta) {
+      const target = idx + delta;
+      if (target < 0 || target >= this.sources.length) return;
+      const arr = [...this.sources];
+      [arr[idx], arr[target]] = [arr[target], arr[idx]];
+      this.sources = arr;
+    },
+
+    // ----- derived -----
+    get filteredRows() {
+      let rows = this.rows;
+      if (this.filter === 'apply')      rows = rows.filter(r => r.apply == 1);
+      else if (this.filter === 'skip')  rows = rows.filter(r => r.apply != 1);
+      else if (this.filter === 'no-match')   rows = rows.filter(r => r.match_method === 'no-match');
+      else if (this.filter === 'already-cn') rows = rows.filter(r => r.match_method === 'already-cn');
+      else if (this.filter === 'review') {
+        rows = rows.filter(r => /^(alias-fuzzy|position|per-track)/.test(r.match_method || ''));
+      }
+      if (this.search.trim()) {
+        const q = this.search.toLowerCase();
+        rows = rows.filter(r =>
+          (r.file || '').toLowerCase().includes(q) ||
+          (r.old_title || '').toLowerCase().includes(q) ||
+          (r.new_title || '').toLowerCase().includes(q) ||
+          (r.old_artist || '').toLowerCase().includes(q) ||
+          (r.new_artist || '').toLowerCase().includes(q));
+      }
+      return rows;
+    },
+
+    get selectedCount() {
+      return this.rows.filter(r => r.apply == 1).length;
+    },
+
+    get allVisibleSelected() {
+      const v = this.filteredRows;
+      return v.length > 0 && v.every(r => r.apply == 1);
+    },
+
+    // ----- helpers -----
+    basename(p) { return (p || '').split(/[\\/]/).pop(); },
+    dirname(p)  { return (p || '').split(/[\\/]/).slice(0, -1).join('/'); },
+
+    sourceStyle(s) {
+      if (s === 'itunes')  return 'bg-sky-50 text-sky-700 ring-sky-200';
+      if (s === 'netease') return 'bg-rose-50 text-rose-700 ring-rose-200';
+      return 'bg-slate-50 text-slate-500 ring-slate-200';
+    },
+
+    methodStyle(m) {
+      if (!m) return 'bg-slate-50 text-slate-500 ring-slate-200';
+      if (m === 'tracknumber' || m === 'tracknumber+alias' || m === 'alias-exact')
+        return 'bg-emerald-50 text-emerald-700 ring-emerald-200';
+      if (m.startsWith('alias-fuzzy'))
+        return 'bg-amber-50 text-amber-700 ring-amber-200';
+      if (m === 'position')
+        return 'bg-blue-50 text-blue-700 ring-blue-200';
+      if (m === 'per-track')
+        return 'bg-violet-50 text-violet-700 ring-violet-200';
+      if (m === 'no-match')
+        return 'bg-rose-50 text-rose-700 ring-rose-200';
+      if (m === 'already-cn')
+        return 'bg-slate-50 text-slate-500 ring-slate-200';
+      return 'bg-slate-50 text-slate-500 ring-slate-200';
+    },
+
+    setAllVisible(value) {
+      this.filteredRows.forEach(r => r.apply = value);
+    },
+
+    // ----- toast -----
+    toast(msg, kind = '') {
+      this.toastMessage = msg;
+      this.toastKind = kind;
+      clearTimeout(this._toastT);
+      this._toastT = setTimeout(() => { this.toastMessage = ''; this.toastKind = ''; }, 4000);
+    },
+
+    // ----- directory browser -----
+    async openBrowser(initialPath) {
+      this.browser.open = true;
+      await this.browseTo(initialPath || '');
+    },
+
+    closeBrowser() { this.browser.open = false; },
+
+    async browseTo(path) {
+      this.browser.loading = true;
+      try {
+        const url = '/api/browse' + (path ? `?path=${encodeURIComponent(path)}` : '');
+        const r = await fetch(url);
+        const data = await r.json();
+        if (data.error) { this.toast(data.error, 'error'); return; }
+        this.browser.path = data.path;
+        this.browser.parent = data.parent;
+        this.browser.entries = data.entries || [];
+        this.browser.current_count = data.current_count || 0;
+      } catch (e) {
+        this.toast('浏览失败: ' + e.message, 'error');
+      } finally {
+        this.browser.loading = false;
+      }
+    },
+
+    confirmBrowse() {
+      if (!this.browser.path) return;
+      this.srcDir = this.browser.path;
+      this.browser.open = false;
+    },
+
+    // ----- scan -----
+    async startScan() {
+      if (!this.srcDir) { this.toast('请先选择音乐目录', 'error'); return; }
+      this.scanning = true;
+      this.rows = [];
+      this.logLines = [];
+      this.progress = { done: 0, total: 0 };
+      this.currentFolder = null;
+
+      try {
+        const r = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            directory: this.srcDir,
+            threshold: this.threshold,
+            vote_n: this.voteN,
+            per_track: this.perTrack,
+            country: this.country,
+            simplified: this.simplified,
+            sources: this.sources,
+          }),
+        });
+        const data = await r.json();
+        if (data.error) { this.toast(data.error, 'error'); this.scanning = false; return; }
+
+        const es = new EventSource(`/api/scan/${data.job_id}/events`);
+        es.onmessage = e => {
+          try { this.handleEvent(JSON.parse(e.data)); } catch {}
+        };
+        es.addEventListener('end', () => { es.close(); this.onScanEnd(); });
+        es.onerror = () => { es.close(); this.onScanEnd(); };
+      } catch (e) {
+        this.toast('启动扫描失败: ' + e.message, 'error');
+        this.scanning = false;
+      }
+    },
+
+    onScanEnd() {
+      this.scanning = false;
+      this.toast(`扫描完成，共 ${this.rows.length} 条`, 'success');
+    },
+
+    handleEvent(ev) {
+      switch (ev.type) {
+        case 'start':
+          this.logLines.push(`找到 ${ev.file_count} 个音频文件`);
+          break;
+        case 'grouped':
+          this.progress.total = ev.folder_count;
+          this.logLines.push(`分组为 ${ev.folder_count} 个文件夹`);
+          break;
+        case 'folder_start':
+          this.currentFolder = ev;
+          this.logLines.push(`▶ [${ev.index}/${ev.total}] ${this.basename(ev.folder)}  (${ev.track_count} tracks)`);
+          break;
+        case 'translated':
+          this.logLines.push(`  翻译 [${this.sourceLabel(ev.via)}]: ${ev.from_artist} - ${ev.from_album} → ${ev.to_artist} - ${ev.to_album}`);
+          break;
+        case 'translation_skipped':
+          this.logLines.push(`  · 跳过翻译（已是中文）: ${ev.artist} - ${ev.album}`);
+          break;
+        case 'translation_failed':
+          this.logLines.push(`  ! 翻译失败: ${ev.from_artist} - ${ev.from_album}`);
+          break;
+        case 'source_try':
+          this.logLines.push(`  尝试 ${this.sourceLabel(ev.source)}…`);
+          break;
+        case 'source_miss':
+          this.logLines.push(`  · ${this.sourceLabel(ev.source)} 未命中`);
+          break;
+        case 'vote':
+          this.logLines.push(`  [${this.sourceLabel(ev.source)}] 投票 → ${ev.album_artist} - ${ev.album_name}  (${ev.count}/${ev.n_voters})`);
+          break;
+        case 'album_resolved':
+          this.logLines.push(`  ✓ [${this.sourceLabel(ev.source)}] 专辑确认 (${ev.via||'-'}): ${ev.album_artist} - ${ev.album_name}  (${ev.track_count} tracks)`);
+          break;
+        case 'fallback':
+          this.logLines.push(`  ! 所有源都失败，退回逐曲搜索`);
+          break;
+        case 'row':
+          this.rows.push(ev.row);
+          break;
+        case 'folder_done':
+          this.progress.done = ev.index;
+          break;
+        case 'done':
+          this.logLines.push(`完成。`);
+          break;
+        case 'error':
+          this.logLines.push(`错误: ${ev.message}`);
+          this.toast(ev.message, 'error');
+          break;
+      }
+      // Auto-scroll log
+      this.$nextTick(() => {
+        const el = this.$refs.logFeed;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+
+    // ----- preview & confirm flow -----
+    async previewAlbum() {
+      if (!this.srcDir) { this.toast('请先选择音乐目录', 'error'); return; }
+      const album = this.manual.album.trim();
+      const artist = this.manual.artist.trim();
+      if (!album && !artist) { this.toast('请填专辑名或艺人名', 'error'); return; }
+
+      this.previewLoading = true;
+      this.previewCandidates = [];
+      try {
+        const r = await fetch('/api/itunes-preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            album, artist,
+            folder: this.srcDir,
+            country: this.country,
+            simplified: this.simplified,
+          }),
+        });
+        const data = await r.json();
+        if (data.error) { this.toast(data.error, 'error'); return; }
+        this.previewCandidates = data.candidates || [];
+        this.previewLocalCount = data.local_count || 0;
+        if (!this.previewCandidates.length) {
+          this.toast('没找到 CJK 候选，换个 storefront 或 artist 名再试', '');
+        }
+      } catch (e) {
+        this.toast('搜索失败: ' + e.message, 'error');
+      } finally {
+        this.previewLoading = false;
+      }
+    },
+
+    async confirmCandidate(candidate) {
+      if (!this.srcDir) { this.toast('音乐目录未选', 'error'); return; }
+      this.confirmLoading = true;
+      try {
+        const r = await fetch('/api/match-folder', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            folder: this.srcDir,
+            source: 'itunes',
+            album_id: candidate.album_id,
+            country: this.country,
+            simplified: this.simplified,
+            threshold: this.threshold,
+          }),
+        });
+        const data = await r.json();
+        if (data.error) { this.toast(data.error, 'error'); return; }
+
+        // Replace rows from this folder; append new
+        const norm = p => (p || '').replace(/[\\\/]+/g, '/').replace(/\/$/, '').toLowerCase();
+        const target = norm(data.folder || this.srcDir);
+        this.rows = [
+          ...this.rows.filter(r => norm(this.dirname(r.file)) !== target),
+          ...(data.rows || []),
+        ];
+        this.previewCandidates = [];  // close the panel
+        this.toast(`✓ ${data.album.artist} - ${data.album.name}  (${data.rows.length} 行)`, 'success');
+      } catch (e) {
+        this.toast('匹配失败: ' + e.message, 'error');
+      } finally {
+        this.confirmLoading = false;
+      }
+    },
+
+    // ----- apply -----
+    async applySelected() {
+      const selected = this.rows.filter(r => r.apply == 1);
+      if (!selected.length) return;
+      const note = this.renameFiles ? '（含重命名文件）' : '（仅写入 tag）';
+      if (!confirm(`即将修改 ${selected.length} 个文件 ${note}，确认应用？`)) return;
+      try {
+        const r = await fetch('/api/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rows: selected, rename: this.renameFiles }),
+        });
+        const data = await r.json();
+        const parts = [`成功 ${data.ok_count}`, `跳过 ${data.skip_count}`, `失败 ${data.fail_count}`];
+        if (data.renamed_count) parts.push(`重命名 ${data.renamed_count}`);
+        this.toast(parts.join('，'), data.fail_count ? 'error' : 'success');
+
+        // Update in-memory paths for renamed files; uncheck applied rows.
+        const byOld = new Map(data.results.map(x => [x.file, x]));
+        this.rows.forEach(row => {
+          const res = byOld.get(row.file);
+          if (!res || !res.ok || res.skipped) return;
+          if (res.new_file) row.file = res.new_file;
+          row.apply = 0;
+        });
+      } catch (e) { this.toast('应用失败: ' + e.message, 'error'); }
+    },
+  };
+}
+</script>
+
+</body>
+</html>

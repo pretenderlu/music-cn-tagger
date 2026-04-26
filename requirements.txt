@@ -1,0 +1,5 @@
+mutagen>=1.47.0
+requests>=2.31.0
+flask>=3.0.0
+zhconv>=1.4.3
+pypinyin>=0.55.0
