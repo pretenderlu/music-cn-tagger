@@ -57,6 +57,15 @@ def _default_browse_path() -> Path:
     return Path.home()
 
 
+def _enforced_root() -> Path | None:
+    return Path(MUSIC_ROOT).resolve() if MUSIC_ROOT else None
+
+
+def _path_allowed(path: Path) -> bool:
+    root = _enforced_root()
+    return not root or _is_within(path, root)
+
+
 @app.get("/api/browse")
 def browse():
     """List entries (dirs + audio file counts) under the requested path,
@@ -66,7 +75,7 @@ def browse():
     path = Path(path_str).resolve() if path_str else _default_browse_path().resolve()
 
     # Constrain to MUSIC_ROOT subtree when configured
-    root = Path(MUSIC_ROOT).resolve() if MUSIC_ROOT else None
+    root = _enforced_root()
     if root and not _is_within(path, root):
         path = root
 
@@ -178,6 +187,8 @@ def start_scan():
     directory = (data.get("directory") or "").strip()
     if not directory or not Path(directory).is_dir():
         return jsonify({"error": "无效的目录"}), 400
+    if not _path_allowed(Path(directory)):
+        return jsonify({"error": "目录超出允许范围"}), 403
 
     sources_raw = data.get("sources") or ["netease", "itunes"]
     if isinstance(sources_raw, str):
@@ -269,7 +280,7 @@ def itunes_preview():
     )
 
     target_count = 0
-    if folder and Path(folder).is_dir():
+    if folder and Path(folder).is_dir() and _path_allowed(Path(folder)):
         target_count = sum(
             1 for p in Path(folder).iterdir()
             if p.is_file() and p.suffix.lower() in tg.MUSIC_EXTS
@@ -363,6 +374,8 @@ def match_folder():
     folder = Path(folder_str) if folder_str else None
     if not folder or not folder.is_dir():
         return jsonify({"error": "无效的文件夹"}), 400
+    if not _path_allowed(folder):
+        return jsonify({"error": "目录超出允许范围"}), 403
     if not album_id:
         return jsonify({"error": "缺少 album_id"}), 400
 
@@ -413,6 +426,10 @@ def apply_changes():
         path = Path(row.get("file", ""))
         if not path.exists():
             results.append({"file": str(path), "ok": False, "error": "file missing"})
+            fail_count += 1
+            continue
+        if not _path_allowed(path):
+            results.append({"file": str(path), "ok": False, "error": "path outside allowed root"})
             fail_count += 1
             continue
         new_tags = {}
