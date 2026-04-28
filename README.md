@@ -25,7 +25,10 @@
    ```bat
    pip install -r requirements.txt
    ```
-3. 双击 `start.bat` 启动
+3. 双击 `start.vbs`（**静默启动**，无控制台窗口，日常使用推荐）
+   或 `start.bat`（**调试启动**，保留命令行窗口看日志/报错）
+
+> 静默模式下要停止服务：任务管理器里 kill `pythonw.exe`（或浏览器关掉、命令行 `taskkill /im pythonw.exe`）
 
 ### macOS
 
