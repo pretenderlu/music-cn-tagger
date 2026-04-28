@@ -16,23 +16,41 @@
 
 ## 📦 安装
 
-需要 Python **3.10+**：
+需要 **Python 3.10+**。
+
+### Windows
+
+1. 装 [Python 3.12 from python.org](https://www.python.org/downloads/windows/)（安装时勾选 *Add Python to PATH*；tkinter 和 pip 默认带）
+2. 在项目目录开 PowerShell / CMD：
+   ```bat
+   pip install -r requirements.txt
+   ```
+3. 双击 `start.bat` 启动
+
+### macOS
+
+1. 装 Python（推荐 [python.org installer](https://www.python.org/downloads/macos/)，自带 tkinter；用 Homebrew 装的话需要额外 `brew install python-tk`，否则原生文件夹选择器会回落到浏览器内 modal）
+2. 终端 `cd` 到项目目录：
+   ```bash
+   pip3 install -r requirements.txt
+   chmod +x start.sh   # 第一次需要赋执行权
+   ./start.sh
+   ```
+3. 首次跑可能弹「无法验证开发者」——`系统设置 → 隐私与安全性` 里点「仍要打开」即可（这是因为 mutagen 等依赖里有未签名的二进制扩展）
+
+### Linux
 
 ```bash
+sudo apt install python3-tk           # tkinter 通常要单独装
 pip install -r requirements.txt
-```
-
-## 🚀 启动
-
-**Windows**：双击 `start.bat`
-
-**Linux / macOS**：
-
-```bash
 ./start.sh
 ```
 
-或直接 `python app.py`。启动后会自动打开 `http://localhost:5174`。
+### 通用
+
+也可以直接 `python app.py` / `python3 app.py`。启动后浏览器自动打开 `http://localhost:5174`。
+
+第一次自动扫描会创建 `~/.music-cn-tagger/cache.db` 缓存 MusicBrainz / Wikidata 查询结果（30 天 TTL，可随时删除重建）。
 
 ## 🎬 使用流程
 
@@ -88,15 +106,21 @@ python tagger.py apply "E:/Music/某专辑/music_cn_suggestions.csv" --dry-run
 | `PORT` | `5174` | 端口 |
 | `MUSIC_ROOT` | （空）| 限制目录浏览器只能在此子树内 |
 | `OPEN_BROWSER` | `1` | 启动时是否自动打开浏览器 |
+| `MUSIC_CN_TAGGER_CACHE` | `~/.music-cn-tagger/cache.db` | 自定义百科查询缓存路径 |
 
 ## 🛠 技术栈
 
-- **后端**：Flask + mutagen + zhconv + pypinyin + requests
+- **后端**：Flask + mutagen + zhconv + pypinyin + requests + sqlite3
 - **前端**：Tailwind CSS + Alpine.js（CDN，零构建）
-- **数据源**：iTunes Search API（无需注册）+ NetEase Cloud Music API（非官方）
+- **数据源**（按解析阶段）：
+  - **Stage 0 实体解析**：MusicBrainz API（`musicbrainz.org`，1 req/s 节流）+ Wikidata（`wikidata.org`，SPARQL 查专辑）—— 把英文/拼音艺人/专辑名解析到中文官名
+  - **Stage 1 翻译兜底**：iTunes Search API 自带的英文别名索引
+  - **Stage 2 曲目数据**：NetEase Cloud Music API（非官方）+ iTunes Search API
+- **跨平台**：纯 Python，Windows / macOS / Linux 同一份源码
 
 ## ⚠️ 已知局限
 
+- MusicBrainz API 在国内偶发 TLS 不通，已加重试；连续失败会自动 fall through 到 Wikidata 路径
 - iTunes 数据源不覆盖**网络厂牌 / 独立单曲**，对小众作品命中率低
 - NetEase 部分艺人专辑因版权撤掉了搜索索引（如周杰伦的部分专辑），但通过 album_id 直接拉曲目仍然可用
 - 翻唱 / 同名异曲偶尔会带偏排序——所以**确认候选这一步不能省**
