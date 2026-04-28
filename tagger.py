@@ -32,6 +32,8 @@ from typing import Callable
 import requests
 from mutagen import File as MutagenFile
 
+import encyclopedia as _encyc
+
 try:
     from zhconv import convert as _zh_convert
     _HAS_ZHCONV = True
@@ -76,6 +78,7 @@ class ScanOptions:
     country: str = "tw"
     simplified: bool = True
     sources: tuple[str, ...] = ("netease", "itunes")
+    use_encyclopedia: bool = True  # Stage 0 entity resolution via MusicBrainz/Wikidata
 
 
 # ---------- helpers ---------- #
@@ -731,6 +734,74 @@ def netease_find_album(cn_album: str, cn_artist: str, target_count: int,
     return None
 
 
+def _encyclopedia_resolve(raw_album: str, raw_artist: str, target_count: int,
+                           opts: ScanOptions) -> dict | None:
+    """Stage 0: resolve raw artist/album to canonical Chinese names via
+    external knowledge bases (MusicBrainz, with Wikidata as fallback).
+    Returns ``{cn_album, cn_artist, source, via, score, ...}`` or None.
+
+    Skipped silently when use_encyclopedia is off or both inputs are CJK
+    already. When the artist resolves but the album doesn't appear in the
+    artist's discography, returns None — caller falls back to the existing
+    iTunes-translate path.
+    """
+    if not opts.use_encyclopedia or not raw_artist:
+        return None
+    if has_cjk(raw_album) and has_cjk(raw_artist):
+        return None
+
+    candidates = _encyc.find_artist_candidates(raw_artist)
+    if not candidates:
+        return None
+    primary = candidates[0]
+    cn_artist = to_zh_cn(primary["cn_name"], opts)
+
+    # If the user already has a CJK album tag, trust it and just attach the
+    # resolved artist name. Saves a discography lookup and works for albums
+    # the encyclopedia hasn't catalogued yet.
+    if has_cjk(raw_album):
+        return {
+            "cn_album": raw_album,
+            "cn_artist": cn_artist,
+            "source": primary["source"],
+            "via": f"{primary['source']}-artist-only",
+            "score": 0.85,
+            "ext_artist_id": primary["id"],
+        }
+
+    # Score albums against raw_album across every available source's
+    # discography; pick the global best. This rescues cases like
+    # "Common Jasmin Orange" → 七里香 where one source has the alias and
+    # the other doesn't.
+    best = None  # (artist_rec, album_rec, score, cn_name)
+    for artist in candidates:
+        for alb in _encyc.artist_albums(artist):
+            cand_names = [alb.get("name") or ""] + (alb.get("aliases") or [])
+            cand_names = [n for n in cand_names if n]
+            for nm in cand_names:
+                score = name_match_score(raw_album, nm)
+                if best is None or score > best[2]:
+                    cn = alb.get("cn_name") or next(
+                        (n for n in cand_names if has_cjk(n)), None
+                    )
+                    if cn:
+                        best = (artist, alb, score, cn)
+
+    if not best or best[2] < 0.55:
+        return None
+
+    artist, alb, score, cn = best
+    return {
+        "cn_album": to_zh_cn(cn, opts),
+        "cn_artist": cn_artist,
+        "source": artist["source"],
+        "via": f"{artist['source']}-discography",
+        "score": round(score, 2),
+        "ext_artist_id": artist["id"],
+        "ext_album_id": alb.get("id"),
+    }
+
+
 def resolve_album_two_stage(tagged: list[tuple[Path, dict]], opts: ScanOptions, emit: EmitFn):
     """Two-stage resolution: translate names to Chinese, then look up the
     album in each enabled source by Chinese name. Returns
@@ -746,10 +817,22 @@ def resolve_album_two_stage(tagged: list[tuple[Path, dict]], opts: ScanOptions, 
     cn_album, cn_artist = raw_album, raw_artist
     itunes_match: dict | None = None
 
-    # Stage 1: translate via iTunes if input isn't already CJK
-    if has_cjk(raw_album) and has_cjk(raw_artist):
+    # Stage 0: encyclopedia (MusicBrainz/Wikidata) entity resolution
+    encyc_match = _encyclopedia_resolve(raw_album, raw_artist, target, opts)
+    if encyc_match:
+        cn_album = encyc_match["cn_album"]
+        cn_artist = encyc_match["cn_artist"]
+        emit({
+            "type": "translated",
+            "via": encyc_match["via"],
+            "from_album": raw_album, "from_artist": raw_artist,
+            "to_album": cn_album, "to_artist": cn_artist,
+            "score": encyc_match["score"],
+        })
+    elif has_cjk(raw_album) and has_cjk(raw_artist):
         emit({"type": "translation_skipped", "album": cn_album, "artist": cn_artist})
     else:
+        # Stage 1: iTunes-translate fallback (existing behavior)
         itunes_match = itunes_translate_album(raw_album, raw_artist, target, opts)
         if itunes_match:
             cn_album = itunes_match["album_name"]
@@ -1032,6 +1115,12 @@ def cli_emitter(event: dict) -> None:
         print(f"  trying source: {event['source']}", flush=True)
     elif t == "source_miss":
         print(f"  · {event['source']} did not resolve", flush=True)
+    elif t == "translated":
+        print(f"  [{event.get('via', '?')}] {event['from_artist']} - {event['from_album']}  "
+              f"→  {event['to_artist']} - {event['to_album']}", flush=True)
+    elif t == "translation_failed":
+        print(f"  · could not translate: {event.get('from_artist','')} - {event.get('from_album','')}",
+              flush=True)
     elif t == "vote":
         print(f"  [{event['source']}] vote: {event['votes']} → winner={event['winner']} "
               f"({event['album_artist']} - {event['album_name']}, "
@@ -1060,6 +1149,7 @@ def cmd_scan(args):
         vote_n=args.vote_n, per_track=args.per_track,
         country=args.country, simplified=not args.no_simplified,
         sources=sources or ("itunes", "netease"),
+        use_encyclopedia=not args.no_encyclopedia,
     )
     rows = scan_directory(Path(args.directory), opts, on_event=cli_emitter)
     out_path = Path(args.output) if args.output else Path(args.directory).resolve() / "music_cn_suggestions.csv"
@@ -1134,6 +1224,8 @@ def main():
                     help="keep Traditional Chinese as-is (default converts TW→CN)")
     sp.add_argument("--sources", default="itunes,netease",
                     help="comma-separated source order (default: itunes,netease)")
+    sp.add_argument("--no-encyclopedia", action="store_true",
+                    help="skip Stage 0 MusicBrainz/Wikidata resolution")
     sp.set_defaults(func=cmd_scan)
 
     sp = sub.add_parser("apply", help="apply tag changes from a suggestion CSV")

@@ -120,6 +120,56 @@ def browse():
     })
 
 
+# ---------- native folder picker ---------- #
+
+@app.post("/api/pick-dir")
+def pick_dir():
+    """Open the OS-native folder dialog (tkinter) on the server. Only
+    enabled when the server is on loopback and MUSIC_ROOT is unset, since
+    a server-side dialog only makes sense for local single-user use. The
+    frontend falls back to the in-browser /api/browse modal otherwise.
+
+    Returns {"path": <absolute path>} on pick, {"cancelled": true} if
+    the user dismissed the dialog, or {"error": ...} with status 409 when
+    the picker isn't available in this deployment."""
+    bind_host = os.environ.get("HOST", "127.0.0.1")
+    if bind_host not in ("127.0.0.1", "localhost", "::1"):
+        return jsonify({"error": "native picker disabled when bound to non-loopback host"}), 409
+    if MUSIC_ROOT:
+        return jsonify({"error": "native picker disabled when MUSIC_ROOT is set"}), 409
+
+    data = request.get_json(silent=True) or {}
+    initial = (data.get("initial") or "").strip() or str(_default_browse_path())
+
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as e:
+        return jsonify({"error": f"tkinter unavailable: {e}"}), 500
+
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes("-topmost", True)
+        root.update_idletasks()
+        try:
+            picked = filedialog.askdirectory(
+                parent=root, initialdir=initial, title="选择音乐目录",
+                mustexist=True,
+            )
+        finally:
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
+    except Exception as e:
+        return jsonify({"error": f"dialog failed: {e}"}), 500
+
+    if not picked:
+        return jsonify({"cancelled": True})
+    return jsonify({"path": str(Path(picked))})
+
+
 # ---------- scan job ---------- #
 
 @app.post("/api/scan")
@@ -141,6 +191,7 @@ def start_scan():
         country=str(data.get("country") or "tw"),
         simplified=bool(data.get("simplified", True)),
         sources=tuple(sources_raw),
+        use_encyclopedia=bool(data.get("use_encyclopedia", True)),
     )
 
     job_id = f"j{int(time.time() * 1000)}"

@@ -172,6 +172,11 @@
       </div>
       <div>
         <label class="block text-sm font-medium text-slate-700 mb-2">扫描 / 应用</label>
+        <label class="flex items-center gap-2.5 cursor-pointer p-2 rounded-lg hover:bg-slate-50 transition"
+               title="先到 MusicBrainz / Wikidata 把英文艺人/专辑名解析成中文官名，再去 iTunes / 网易云查询。命中率更高，但每个新艺人会多一次外部 API 调用。">
+          <input type="checkbox" x-model="useEncyclopedia" class="chk">
+          <span class="text-sm text-slate-700">启用百科解析 <span class="text-slate-400 font-normal">(MB → Wikidata)</span></span>
+        </label>
         <label class="flex items-center gap-2.5 cursor-pointer p-2 rounded-lg hover:bg-slate-50 transition">
           <input type="checkbox" x-model="perTrack" class="chk">
           <span class="text-sm text-slate-700">逐曲搜索（自动模式）</span>
@@ -546,6 +551,7 @@ function app() {
     simplified: true,
     sources: ['netease', 'itunes'],
     renameFiles: true,
+    useEncyclopedia: true,
 
     // Scan state
     scanning: false,
@@ -583,8 +589,9 @@ function app() {
         if (saved.simplified !== undefined) this.simplified = saved.simplified;
         if (Array.isArray(saved.sources) && saved.sources.length) this.sources = saved.sources;
         if (saved.renameFiles !== undefined) this.renameFiles = saved.renameFiles;
+        if (saved.useEncyclopedia !== undefined) this.useEncyclopedia = saved.useEncyclopedia;
       } catch {}
-      const keys = ['srcDir','threshold','voteN','perTrack','country','simplified','sources','renameFiles'];
+      const keys = ['srcDir','threshold','voteN','perTrack','country','simplified','sources','renameFiles','useEncyclopedia'];
       keys.forEach(k => this.$watch(k, () => this.persist()));
     },
 
@@ -594,13 +601,20 @@ function app() {
         threshold: this.threshold, voteN: this.voteN, perTrack: this.perTrack,
         country: this.country, simplified: this.simplified,
         sources: [...this.sources], renameFiles: this.renameFiles,
+        useEncyclopedia: this.useEncyclopedia,
       }));
     },
 
     sourceLabel(s) {
+      if (!s) return '';
+      // Encyclopedia phase tags emitted by the resolver
+      if (s.startsWith('mb-')) return s === 'mb-artist-only' ? 'MusicBrainz (仅艺人)' : 'MusicBrainz';
+      if (s.startsWith('wd-')) return s === 'wd-artist-only' ? 'Wikidata (仅艺人)' : 'Wikidata';
       return ({
         itunes: 'Apple iTunes',
         netease: '网易云音乐',
+        mb: 'MusicBrainz',
+        wd: 'Wikidata',
       })[s] || s;
     },
 
@@ -684,6 +698,28 @@ function app() {
 
     // ----- directory browser -----
     async openBrowser(initialPath) {
+      // Try OS-native folder picker first (server-side tkinter). Falls back
+      // to the in-browser modal when the server can't pop a native dialog
+      // (remote host, MUSIC_ROOT constrained, or tkinter missing).
+      try {
+        const r = await fetch('/api/pick-dir', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ initial: initialPath || '' }),
+        });
+        if (r.status === 409) {
+          // Native picker disabled — fall through to modal
+        } else if (r.ok) {
+          const data = await r.json();
+          if (data.cancelled) return;
+          if (data.path) { this.srcDir = data.path; return; }
+          // unexpected shape — fall through to modal
+        } else {
+          // 500 etc — fall through to modal
+        }
+      } catch {
+        // network/abort — fall through to modal
+      }
       this.browser.open = true;
       await this.browseTo(initialPath || '');
     },
@@ -735,6 +771,7 @@ function app() {
             country: this.country,
             simplified: this.simplified,
             sources: this.sources,
+            use_encyclopedia: this.useEncyclopedia,
           }),
         });
         const data = await r.json();
