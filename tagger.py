@@ -7,10 +7,10 @@ Auto-scan flow is two-stage:
   1. Translate raw artist/album → Chinese names via iTunes (album search,
      with an artist→discography fallback that matches by pinyin so e.g.
      'Dan Dan You Qing' resolves to 淡淡幽情).
-  2. Look up the Chinese album in each source from `ScanOptions.sources`
-     in order (default: NetEase first, iTunes fallback). NetEase carries
-     richer Chinese metadata when it has the album; iTunes covers the
-     gaps (notably albums NetEase has lost to licensing).
+  2. Look up the album in each enabled source from `ScanOptions.sources`
+     in order (default: iTunes only; NetEase is optional). Matched albums
+     are emitted with their track lists for user confirmation instead of
+     being accepted or rejected only by whether album/artist text has CJK.
 
 Storefront defaults to Taiwan ('tw') for catalog completeness; iTunes
 results are converted Traditional → Simplified via zhconv when
@@ -24,7 +24,7 @@ import re
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
@@ -49,6 +49,7 @@ except ImportError:
 MUSIC_EXTS = {".mp3", ".flac", ".m4a", ".mp4", ".ogg", ".oga", ".opus", ".wav"}
 TAG_FIELDS = ["title", "artist", "album", "albumartist", "genre"]
 HELPER_FIELDS = ["tracknumber", "discnumber"]
+ARTIST_CATALOG_CANDIDATE_LIMIT = 8
 
 CJK_RE = re.compile(r"[一-鿿㐀-䶿豈-﫿]")
 
@@ -68,6 +69,32 @@ NETEASE_HEADERS = {
 }
 
 
+KNOWN_SOURCES = ("itunes", "netease")
+DEFAULT_SOURCES = ("itunes",)
+
+
+def normalize_sources(sources) -> tuple[str, ...]:
+    if sources is None:
+        return DEFAULT_SOURCES
+    if isinstance(sources, str):
+        raw_sources = [s.strip() for s in sources.split(",")]
+    else:
+        raw_sources = [str(s).strip() for s in sources]
+
+    normalized: list[str] = []
+    for source in raw_sources:
+        key = source.lower()
+        if not key:
+            continue
+        if key not in KNOWN_SOURCES:
+            raise ValueError(f"unknown source: {source}")
+        if key not in normalized:
+            normalized.append(key)
+    if not normalized:
+        raise ValueError("select at least one search source")
+    return tuple(normalized)
+
+
 @dataclass
 class ScanOptions:
     limit: int = 10
@@ -77,7 +104,7 @@ class ScanOptions:
     per_track: bool = False
     country: str = "tw"
     simplified: bool = True
-    sources: tuple[str, ...] = ("netease", "itunes")
+    sources: tuple[str, ...] = DEFAULT_SOURCES
     use_encyclopedia: bool = True  # Stage 0 entity resolution via MusicBrainz/Wikidata
 
 
@@ -247,23 +274,59 @@ def write_tags(path: Path, new_tags: dict, rename: bool = False) -> Path:
 
 # ---------- iTunes ---------- #
 
+def _itunes_storefronts(opts: ScanOptions) -> tuple[str, ...]:
+    country = (opts.country or "tw").strip().lower() or "tw"
+    storefronts = [country]
+    if country != "us":
+        storefronts.append("us")
+    if country != "tw":
+        storefronts.append("tw")
+    return tuple(storefronts)
+
+
+def _itunes_opts_for_country(opts: ScanOptions, country: str) -> ScanOptions:
+    if (opts.country or "").strip().lower() == country:
+        return opts
+    return replace(opts, country=country)
+
+
+def _dedupe_itunes_results(results: list[dict], key: str) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for item in results:
+        item_key = str(item.get(key, ""))
+        if item_key and item_key in seen:
+            continue
+        if item_key:
+            seen.add(item_key)
+        merged.append(item)
+    return merged
+
+
 def itunes_search_songs(query: str, opts: ScanOptions) -> list[dict]:
     if not query.strip():
         return []
-    try:
-        r = requests.get(
-            ITUNES_SEARCH_URL,
-            params={
-                "term": query, "country": opts.country, "media": "music",
-                "entity": "song", "limit": opts.limit,
-            },
-            headers=ITUNES_HEADERS, timeout=10,
-        )
-        r.raise_for_status()
-        results = r.json().get("results") or []
-    except Exception:
-        return []
-    return [_itunes_track_to_normalized(t, opts) for t in results]
+    normalized: list[dict] = []
+    for country in _itunes_storefronts(opts):
+        country_opts = _itunes_opts_for_country(opts, country)
+        try:
+            r = requests.get(
+                ITUNES_SEARCH_URL,
+                params={
+                    "term": query, "country": country, "media": "music",
+                    "entity": "song", "limit": opts.limit,
+                },
+                headers=ITUNES_HEADERS, timeout=10,
+            )
+            r.raise_for_status()
+            results = r.json().get("results") or []
+        except Exception:
+            continue
+        for track in results:
+            item = _itunes_track_to_normalized(track, country_opts)
+            item["storefront"] = country
+            normalized.append(item)
+    return _dedupe_itunes_results(normalized, "id")
 
 
 def itunes_search_albums(query: str, opts: ScanOptions) -> list[dict]:
@@ -272,45 +335,58 @@ def itunes_search_albums(query: str, opts: ScanOptions) -> list[dict]:
     primary album-resolver for iTunes."""
     if not query.strip():
         return []
-    try:
-        r = requests.get(
-            ITUNES_SEARCH_URL,
-            params={
-                "term": query, "country": opts.country, "media": "music",
-                "entity": "album", "limit": opts.limit,
-            },
-            headers=ITUNES_HEADERS, timeout=10,
-        )
-        r.raise_for_status()
-        return r.json().get("results") or []
-    except Exception:
-        return []
+    albums: list[dict] = []
+    for country in _itunes_storefronts(opts):
+        try:
+            r = requests.get(
+                ITUNES_SEARCH_URL,
+                params={
+                    "term": query, "country": country, "media": "music",
+                    "entity": "album", "limit": opts.limit,
+                },
+                headers=ITUNES_HEADERS, timeout=10,
+            )
+            r.raise_for_status()
+            results = r.json().get("results") or []
+        except Exception:
+            continue
+        for album in results:
+            item = dict(album)
+            item["storefront"] = country
+            albums.append(item)
+    return _dedupe_itunes_results(albums, "collectionId")
 
 
 def itunes_album_detail(album_id: str, opts: ScanOptions) -> tuple[dict, list[dict]]:
-    try:
-        r = requests.get(
-            ITUNES_LOOKUP_URL,
-            params={"id": album_id, "country": opts.country, "entity": "song"},
-            headers=ITUNES_HEADERS, timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json().get("results") or []
-    except Exception:
-        return {}, []
-    album_raw = next((x for x in data if x.get("wrapperType") == "collection"), {})
-    track_raws = [x for x in data if x.get("wrapperType") == "track"]
-    if not album_raw:
-        return {}, []
-    album = {
-        "source": "itunes",
-        "id": str(album_raw.get("collectionId", "")),
-        "name": to_zh_cn(album_raw.get("collectionName", ""), opts),
-        "artist_name": to_zh_cn(album_raw.get("artistName", ""), opts),
-        "track_count": album_raw.get("trackCount") or len(track_raws),
-    }
-    tracks = [_itunes_track_to_normalized(t, opts) for t in track_raws]
-    return album, tracks
+    for country in _itunes_storefronts(opts):
+        country_opts = _itunes_opts_for_country(opts, country)
+        try:
+            r = requests.get(
+                ITUNES_LOOKUP_URL,
+                params={"id": album_id, "country": country, "entity": "song"},
+                headers=ITUNES_HEADERS, timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json().get("results") or []
+        except Exception:
+            continue
+        album_raw = next((x for x in data if x.get("wrapperType") == "collection"), {})
+        track_raws = [x for x in data if x.get("wrapperType") == "track"]
+        if not album_raw or not track_raws:
+            continue
+        album = {
+            "source": "itunes",
+            "id": str(album_raw.get("collectionId", "")),
+            "name": to_zh_cn(album_raw.get("collectionName", ""), country_opts),
+            "artist_name": to_zh_cn(album_raw.get("artistName", ""), country_opts),
+            "track_count": album_raw.get("trackCount") or len(track_raws),
+            "storefront": country,
+        }
+        tracks = [_itunes_track_to_normalized(t, country_opts) for t in track_raws]
+        for track in tracks:
+            track["storefront"] = country
+        return album, tracks
+    return {}, []
 
 
 def _itunes_track_to_normalized(t: dict, opts: ScanOptions) -> dict:
@@ -569,6 +645,106 @@ def _score_album_candidate(rank: int, candidate_track_count: int, target_count: 
     return rank_score * cs
 
 
+def _itunes_artist_name_matches(query: str, candidate: str) -> bool:
+    q = _normalize_text(query)
+    c = _normalize_text(candidate)
+    if not q or not c:
+        return False
+    if q == c:
+        return True
+    if q in c or c in q:
+        shorter, longer = sorted((len(q), len(c)))
+        return shorter / longer >= 0.88
+    return name_match_score(query, candidate) >= 0.75
+
+
+def _itunes_catalog_storefronts(opts: ScanOptions) -> tuple[str, ...]:
+    storefronts = list(_itunes_storefronts(opts))
+    for country in ("cn", "hk", "jp"):
+        if country not in storefronts:
+            storefronts.append(country)
+    return tuple(storefronts)
+
+
+def _itunes_collection_from_track(track: dict, country: str) -> dict | None:
+    cid = track.get("collectionId")
+    if not cid:
+        return None
+    return {
+        "wrapperType": "collection",
+        "collectionId": cid,
+        "collectionName": track.get("collectionName", ""),
+        "artistName": track.get("artistName", ""),
+        "trackCount": track.get("trackCount") or 0,
+        "artworkUrl100": track.get("artworkUrl100", ""),
+        "releaseDate": track.get("releaseDate", ""),
+        "storefront": country,
+    }
+
+
+def _itunes_artist_song_album_candidates(
+    artist_query: str,
+    opts: ScanOptions,
+) -> list[tuple[dict, list[dict]]]:
+    if not artist_query.strip():
+        return []
+
+    groups: dict[str, tuple[dict, list[dict], set[str]]] = {}
+    for country in _itunes_catalog_storefronts(opts):
+        country_opts = _itunes_opts_for_country(opts, country)
+        searches = (
+            {"term": artist_query, "country": country, "media": "music",
+             "entity": "song", "attribute": "artistTerm", "limit": 200},
+            {"term": artist_query, "country": country, "media": "music",
+             "entity": "song", "limit": 200},
+        )
+        for params in searches:
+            try:
+                r = requests.get(ITUNES_SEARCH_URL, params=params,
+                                 headers=ITUNES_HEADERS, timeout=10)
+                r.raise_for_status()
+                song_results = r.json().get("results") or []
+            except Exception:
+                song_results = []
+            for raw_track in song_results:
+                if raw_track.get("wrapperType") != "track":
+                    continue
+                if not _itunes_artist_name_matches(artist_query, raw_track.get("artistName", "")):
+                    continue
+                track = _itunes_track_to_normalized(raw_track, country_opts)
+                track["storefront"] = country
+                album_id = track.get("album_id")
+                track_id = track.get("id")
+                if not album_id or not track_id:
+                    continue
+                if album_id not in groups:
+                    groups[album_id] = (
+                        {
+                            "source": "itunes",
+                            "id": album_id,
+                            "name": track.get("album_name", ""),
+                            "artist_name": track.get("album_artist_name", "") or track.get("artist_name", ""),
+                            "track_count": raw_track.get("trackCount") or 0,
+                            "storefront": country,
+                        },
+                        [],
+                        set(),
+                    )
+                album, tracks, seen = groups[album_id]
+                if track_id in seen:
+                    continue
+                seen.add(track_id)
+                tracks.append(track)
+
+    candidates: list[tuple[dict, list[dict]]] = []
+    for album, tracks, _seen in groups.values():
+        tracks.sort(key=lambda t: (t.get("cd") or 1, t.get("no") or 0, t.get("name", "")))
+        if not album.get("track_count"):
+            album["track_count"] = len(tracks)
+        candidates.append((album, tracks))
+    return candidates
+
+
 def _itunes_lookup_artist_albums(artist_query: str, opts: ScanOptions) -> list[dict]:
     """Find the most likely artistId for an artist query, then return all of
     that artist's albums via /lookup. Falls back to []. Used as a second
@@ -576,36 +752,62 @@ def _itunes_lookup_artist_albums(artist_query: str, opts: ScanOptions) -> list[d
     or pinyin alias isn't indexed)."""
     if not artist_query.strip():
         return []
-    try:
-        r = requests.get(ITUNES_SEARCH_URL,
-                         params={"term": artist_query, "country": opts.country,
-                                 "media": "music", "entity": "musicArtist", "limit": 5},
-                         headers=ITUNES_HEADERS, timeout=10)
-        r.raise_for_status()
-        artists = r.json().get("results") or []
-    except Exception:
-        return []
-    if not artists:
-        return []
+    albums: list[dict] = []
+    for country in _itunes_catalog_storefronts(opts):
+        try:
+            r = requests.get(ITUNES_SEARCH_URL,
+                             params={"term": artist_query, "country": country,
+                                     "media": "music", "entity": "musicArtist", "limit": 5},
+                             headers=ITUNES_HEADERS, timeout=10)
+            r.raise_for_status()
+            artists = r.json().get("results") or []
+        except Exception:
+            artists = []
+        if artists:
+            # Prefer CJK-named artists, but US often indexes useful English aliases.
+            cjk = [a for a in artists if has_cjk(a.get("artistName", ""))]
+            pool = cjk if cjk else artists
+            best = max(pool, key=lambda a: name_match_score(artist_query, a.get("artistName", "")))
+            aid = best.get("artistId")
+            if aid:
+                try:
+                    r = requests.get(ITUNES_LOOKUP_URL,
+                                     params={"id": aid, "country": country,
+                                             "entity": "album", "limit": 200},
+                                     headers=ITUNES_HEADERS, timeout=10)
+                    r.raise_for_status()
+                    results = r.json().get("results") or []
+                except Exception:
+                    results = []
+                for album in results:
+                    if album.get("wrapperType") != "collection":
+                        continue
+                    item = dict(album)
+                    item["storefront"] = country
+                    albums.append(item)
 
-    # Prefer CJK-named artists (the genuine entry for Chinese pop is typically
-    # registered with their Chinese name).
-    cjk = [a for a in artists if has_cjk(a.get("artistName", ""))]
-    pool = cjk if cjk else artists
-    best = max(pool, key=lambda a: name_match_score(artist_query, a.get("artistName", "")))
-    aid = best.get("artistId")
-    if not aid:
-        return []
-    try:
-        r = requests.get(ITUNES_LOOKUP_URL,
-                         params={"id": aid, "country": opts.country,
-                                 "entity": "album", "limit": 200},
-                         headers=ITUNES_HEADERS, timeout=10)
-        r.raise_for_status()
-        results = r.json().get("results") or []
-    except Exception:
-        return []
-    return [x for x in results if x.get("wrapperType") == "collection"]
+        for params in (
+            {"term": artist_query, "country": country, "media": "music",
+             "entity": "song", "attribute": "artistTerm", "limit": 200},
+            {"term": artist_query, "country": country, "media": "music",
+             "entity": "song", "limit": 200},
+        ):
+            try:
+                r = requests.get(ITUNES_SEARCH_URL, params=params,
+                                 headers=ITUNES_HEADERS, timeout=10)
+                r.raise_for_status()
+                song_results = r.json().get("results") or []
+            except Exception:
+                song_results = []
+            for track in song_results:
+                if track.get("wrapperType") != "track":
+                    continue
+                if not _itunes_artist_name_matches(artist_query, track.get("artistName", "")):
+                    continue
+                album = _itunes_collection_from_track(track, country)
+                if album:
+                    albums.append(album)
+    return _dedupe_itunes_results(albums, "collectionId")
 
 
 def itunes_translate_album(raw_album: str, raw_artist: str, target_count: int,
@@ -928,6 +1130,147 @@ def resolve_album_id(tagged: list[tuple[Path, dict]], opts: ScanOptions, emit: E
     return winner, best_score
 
 
+def _emit_album_candidate(emit: EmitFn, source: str, album: dict, tracks: list[dict],
+                          via: str | None = None, folder: Path | None = None) -> None:
+    emit({
+        "type": "album_candidate",
+        "source": source,
+        "via": via or "",
+        "folder": str(folder) if folder else "",
+        "album_id": str(album.get("id", "")),
+        "album_name": album.get("name", ""),
+        "album_artist": album.get("artist_name", ""),
+        "track_count": len(tracks),
+        "tracks": [
+            {
+                "id": str(t.get("id", "")),
+                "no": t.get("no"),
+                "cd": t.get("cd"),
+                "name": t.get("name", ""),
+                "artist": t.get("artist_name", ""),
+            }
+            for t in sorted(tracks, key=lambda t: (t.get("cd") or 1, t.get("no") or 0))
+        ],
+    })
+
+
+def _raw_album_artist_from_tagged(tagged: list[tuple[Path, dict]]) -> tuple[str, str]:
+    sample = next((t for _, t in tagged if t.get("album") or t.get("artist")), None)
+    if not sample:
+        return "", ""
+    return (sample.get("album") or "").strip(), (sample.get("artist") or "").strip()
+
+
+def _candidate_local_terms(tagged: list[tuple[Path, dict]], folder: Path) -> list[str]:
+    terms: list[str] = [folder.name]
+    raw_album, _raw_artist = _raw_album_artist_from_tagged(tagged)
+    if raw_album:
+        terms.append(raw_album)
+    for path, tags in tagged:
+        terms.extend([
+            path.stem,
+            (tags.get("title") or "").strip(),
+            (tags.get("album") or "").strip(),
+        ])
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for term in terms:
+        normalized = _normalize_text(term)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(term)
+    return result
+
+
+def _score_artist_catalog_candidate(
+    album: dict,
+    tracks: list[dict],
+    terms: list[str],
+    target_count: int,
+    rank: int,
+) -> float:
+    names = [album.get("name", "")]
+    names.extend(t.get("name", "") for t in tracks)
+    name_score = max(
+        (name_match_score(term, name) for term in terms for name in names if term and name),
+        default=0.0,
+    )
+
+    candidate_count = album.get("track_count") or len(tracks)
+    diff = abs((candidate_count or 0) - target_count)
+    if diff == 0:
+        count_score = 1.0
+    elif diff <= 1:
+        count_score = 0.75
+    elif diff <= 3:
+        count_score = 0.45
+    else:
+        count_score = 0.15
+
+    rank_score = max(0.0, 1.0 - rank * 0.03)
+    if name_score > 0:
+        return name_score * 0.65 + count_score * 0.20 + rank_score * 0.15
+    return count_score * 0.20 + rank_score * 0.30
+
+
+def _rank_artist_catalog_candidates(
+    tagged: list[tuple[Path, dict]],
+    folder: Path,
+    candidates: list[tuple[dict, list[dict]]],
+) -> list[tuple[dict, list[dict]]]:
+    terms = _candidate_local_terms(tagged, folder)
+    target_count = len(tagged)
+    scored = [
+        (_score_artist_catalog_candidate(album, tracks, terms, target_count, rank), rank, album, tracks)
+        for rank, (album, tracks) in enumerate(candidates)
+    ]
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [(album, tracks) for _score, _rank, album, tracks in scored[:ARTIST_CATALOG_CANDIDATE_LIMIT]]
+
+
+def _emit_itunes_artist_catalog_candidates(
+    tagged: list[tuple[Path, dict]],
+    folder: Path,
+    opts: ScanOptions,
+    emit: EmitFn,
+) -> int:
+    if "itunes" not in opts.sources:
+        return 0
+
+    _, raw_artist = _raw_album_artist_from_tagged(tagged)
+    if not raw_artist:
+        return 0
+
+    emitted = 0
+    song_candidates = _rank_artist_catalog_candidates(
+        tagged,
+        folder,
+        _itunes_artist_song_album_candidates(raw_artist, opts),
+    )
+    for album, tracks in song_candidates:
+        _emit_album_candidate(emit, "itunes", album, tracks, via="artist-catalog", folder=folder)
+        emitted += 1
+    if emitted:
+        return emitted
+
+    detail_candidates: list[tuple[dict, list[dict]]] = []
+    for raw_album in _itunes_lookup_artist_albums(raw_artist, opts):
+        album_id = str(raw_album.get("collectionId", ""))
+        if not album_id:
+            continue
+        album, tracks = album_detail("itunes", album_id, opts)
+        if not album or not tracks:
+            continue
+        detail_candidates.append((album, tracks))
+
+    for album, tracks in _rank_artist_catalog_candidates(tagged, folder, detail_candidates):
+        _emit_album_candidate(emit, "itunes", album, tracks, via="artist-catalog", folder=folder)
+        emitted += 1
+    return emitted
+
+
 def _build_rows_for_album(tagged, source, album, ne_tracks, song_score, opts, emit):
     sorted_files = sorted(tagged, key=lambda x: x[0].name.lower())
     sorted_tracks = sorted(ne_tracks, key=lambda t: (t.get("cd") or 1, t.get("no") or 0))
@@ -980,7 +1323,8 @@ def scan_folder_album(folder: Path, files: list[Path], opts: ScanOptions, emit: 
     if result:
         source, album_id, conf = result
         album, ne_tracks = album_detail(source, album_id, opts)
-        if album and ne_tracks and (has_cjk(album.get("name", "")) or has_cjk(album.get("artist_name", ""))):
+        if album and ne_tracks:
+            _emit_album_candidate(emit, source, album, ne_tracks, folder=folder)
             return _build_rows_for_album(tagged, source, album, ne_tracks, conf, opts, emit)
 
     # Path 2: NetEase song-vote — rescues folders whose album/artist tags are
@@ -990,15 +1334,18 @@ def scan_folder_album(folder: Path, files: list[Path], opts: ScanOptions, emit: 
         album_id, song_score = resolve_album_id(tagged, opts, emit, "netease")
         if album_id:
             album, ne_tracks = album_detail("netease", album_id, opts)
-            if album and ne_tracks and (has_cjk(album.get("name", "")) or has_cjk(album.get("artist_name", ""))):
+            if album and ne_tracks:
                 emit({
                     "type": "album_resolved", "source": "netease", "via": "song-vote",
                     "album_id": album_id,
                     "album_name": album["name"], "album_artist": album["artist_name"],
                     "track_count": len(ne_tracks),
                 })
+                _emit_album_candidate(emit, "netease", album, ne_tracks, via="song-vote", folder=folder)
                 return _build_rows_for_album(tagged, "netease", album, ne_tracks, song_score, opts, emit)
         emit({"type": "source_miss", "source": "netease"})
+    if _emit_itunes_artist_catalog_candidates(tagged, folder, opts, emit):
+        return []
     return None
 
 
@@ -1128,8 +1475,16 @@ def cli_emitter(event: dict) -> None:
     elif t == "album_resolved":
         print(f"  [{event['source']}] album → {event['album_artist']} - {event['album_name']}  "
               f"({event['track_count']} tracks, id={event['album_id']})", flush=True)
+    elif t == "album_candidate":
+        print(f"  candidate tracks for {event.get('album_artist','')} - "
+              f"{event.get('album_name','')}:", flush=True)
+        for track in event.get("tracks", []):
+            number = track.get("no") or "?"
+            artist = track.get("artist") or ""
+            suffix = f" - {artist}" if artist else ""
+            print(f"    {number}. {track.get('name', '')}{suffix}", flush=True)
     elif t == "fallback":
-        print("  → all album sources failed; falling back to per-track search", flush=True)
+        print("  → no usable album detail; falling back to per-track search", flush=True)
     elif t == "row":
         r = event["row"]
         name = Path(r["file"]).name
@@ -1143,12 +1498,15 @@ def cli_emitter(event: dict) -> None:
 
 
 def cmd_scan(args):
-    sources = tuple(s.strip() for s in args.sources.split(",") if s.strip())
+    try:
+        sources = normalize_sources(args.sources)
+    except ValueError as e:
+        sys.exit(str(e))
     opts = ScanOptions(
         limit=args.limit, threshold=args.threshold, delay=args.delay,
         vote_n=args.vote_n, per_track=args.per_track,
         country=args.country, simplified=not args.no_simplified,
-        sources=sources or ("itunes", "netease"),
+        sources=sources,
         use_encyclopedia=not args.no_encyclopedia,
     )
     rows = scan_directory(Path(args.directory), opts, on_event=cli_emitter)
@@ -1222,8 +1580,8 @@ def main():
     sp.add_argument("--country", default="tw", help="iTunes storefront (default: tw)")
     sp.add_argument("--no-simplified", action="store_true",
                     help="keep Traditional Chinese as-is (default converts TW→CN)")
-    sp.add_argument("--sources", default="itunes,netease",
-                    help="comma-separated source order (default: itunes,netease)")
+    sp.add_argument("--sources", default="itunes",
+                    help="comma-separated source order (default: itunes; add netease if wanted)")
     sp.add_argument("--no-encyclopedia", action="store_true",
                     help="skip Stage 0 MusicBrainz/Wikidata resolution")
     sp.set_defaults(func=cmd_scan)

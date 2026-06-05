@@ -190,9 +190,10 @@ def start_scan():
     if not _path_allowed(Path(directory)):
         return jsonify({"error": "目录超出允许范围"}), 403
 
-    sources_raw = data.get("sources") or ["netease", "itunes"]
-    if isinstance(sources_raw, str):
-        sources_raw = [s.strip() for s in sources_raw.split(",") if s.strip()]
+    try:
+        sources = tg.normalize_sources(data.get("sources", tg.DEFAULT_SOURCES))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     opts = tg.ScanOptions(
         limit=int(data.get("limit", 10)),
         threshold=float(data.get("threshold", 0.6)),
@@ -201,7 +202,7 @@ def start_scan():
         per_track=bool(data.get("per_track", False)),
         country=str(data.get("country") or "tw"),
         simplified=bool(data.get("simplified", True)),
-        sources=tuple(sources_raw),
+        sources=sources,
         use_encyclopedia=bool(data.get("use_encyclopedia", True)),
     )
 
@@ -306,8 +307,6 @@ def itunes_preview():
     if parts:
         direct = tg.itunes_search_albums(" ".join(parts), opts)
         for idx, a in enumerate(direct):
-            if not (tg.has_cjk(a.get("collectionName", "")) or tg.has_cjk(a.get("artistName", ""))):
-                continue
             aid = str(a.get("collectionId", ""))
             if not aid or aid in seen:
                 continue

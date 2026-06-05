@@ -7,9 +7,9 @@
 ## ✨ 功能
 
 - 🎵 扫描音乐目录（mp3 / flac / m4a / mp4 / ogg / opus / wav），按专辑批量识别
-- 🔄 **两阶段匹配**：iTunes 翻译英文/拼音艺人专辑名 → NetEase / iTunes 中文区拿曲目数据
+- 🔄 **两阶段匹配**：iTunes 翻译英文/拼音艺人专辑名 → 按启用的数据源查找专辑与曲目
 - 🎯 **拼音兜底**：iTunes 直搜失败时，artist → 列出 ta 全部专辑 → 拼音匹配（`Dan Dan You Qing` → 淡淡幽情）
-- ✏️ **手动指定专辑**：填入已知的中文/英文专辑名，列出候选卡片让你点选确认
+- ✏️ **候选专辑确认**：自动扫描和手动搜索都会列出匹配到的专辑、歌手与曲目，供你核对
 - 💾 **一键应用**：写 ID3 tag + 同步重命名文件（`05 - 晴天.mp3`）
 - 🌐 实时进度日志、可编辑的结果表、置信度筛选
 - 🔁 简繁转换（zhconv，TW 储存区拿到的繁体自动转简体）
@@ -61,8 +61,9 @@ pip install -r requirements.txt
 
 1. 点「**浏览**」选音乐目录（每个子目录视为一张专辑）
 2. 点「**开始自动扫描**」
-3. 在结果表里检查、编辑、勾选要应用的行
-4. 点「**应用到 N 个文件**」 → tag 写入 + 文件重命名
+3. 查看「自动匹配候选专辑」，核对歌手、专辑名和曲目列表
+4. 在结果表里检查、编辑、勾选要应用的行
+5. 点「**应用到 N 个文件**」 → tag 写入 + 文件重命名
 
 ### 手动指定专辑（auto 失败 / 标签太烂）
 
@@ -79,7 +80,7 @@ pip install -r requirements.txt
 
 | 项目 | 说明 |
 |---|---|
-| 数据源 | 上下箭头调整 NetEase / iTunes 优先顺序，默认 NetEase 优先（中文区有数据时优先用） |
+| 数据源 | 勾选是否启用 Apple iTunes / NetEase，并用上下箭头调整优先顺序；默认只启用 iTunes，NetEase 可按需开启 |
 | iTunes 储存区 | `tw` 推荐（华语 catalog 最全） / `cn` / `hk` / `jp` / `us` |
 | 简繁转换 | 默认开启，TW 繁体 → 大陆简体 |
 | 置信度阈值 | 低于此分数不自动勾选 apply（默认 0.6） |
@@ -89,8 +90,11 @@ pip install -r requirements.txt
 ## 🧰 命令行用法（无 UI）
 
 ```bash
-# 扫描，输出 CSV 到目录下
+# 扫描，输出 CSV 到目录下（默认只使用 iTunes）
 python tagger.py scan "E:/Music/某专辑"
+
+# 如需同时使用网易云兜底
+python tagger.py scan "E:/Music/某专辑" --sources itunes,netease
 
 # 应用 CSV（含重命名）
 python tagger.py apply "E:/Music/某专辑/music_cn_suggestions.csv" --rename
